@@ -1,0 +1,44 @@
+# Secrets — NEVER commit these
+.env
+.env.local
+*.env
+
+# Runtime logs (contain tunnel IDs + local paths)
+*.log
+*.log.*
+tunnel-*.log
+launcher_error.txt
+
+# Single-instance + caches
+*.pid
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+
+# Local settings live outside the repo (LOCALAPPDATA), but ignore
+# any accidental copies here
+settings.json
+settings.bak.json
+
+# Build output
+dist/
+build/
+*.spec
+*.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node (filesystem MCP downloads via npx)
+node_modules/
+
+# Virtual envs
+.venv/
+venv/
