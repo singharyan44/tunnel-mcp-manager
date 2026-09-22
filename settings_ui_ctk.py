@@ -376,6 +376,148 @@ def open_settings_ctk(
         variable=heal_var,
     ).pack(anchor="w", padx=14, pady=4)
 
+    # Secrets card: vault status, never shows values -------------
+    try:
+        import secrets_store as _sec
+    except Exception:
+        _sec = None
+
+    sec_card = ctk.CTkFrame(scroll, corner_radius=12)
+    sec_card.pack(fill="x", pady=6)
+    ctk.CTkLabel(
+        sec_card, text="Secrets", font=("Segoe UI", 13, "bold")
+    ).pack(anchor="w", padx=14, pady=(10, 2))
+    ctk.CTkLabel(
+        sec_card,
+        text="Values are NEVER shown or saved in settings. "
+             "Vault = Windows Credential Manager, safest.",
+        font=("Segoe UI", 11),
+    ).pack(anchor="w", padx=14)
+    sec_list = ctk.CTkFrame(sec_card, fg_color="transparent")
+    sec_list.pack(fill="x", padx=14, pady=4)
+
+    def _refresh_secrets_ui():
+        for child in sec_list.winfo_children():
+            child.destroy()
+        if _sec is None:
+            ctk.CTkLabel(
+                sec_list, text="Vault module missing."
+            ).pack(anchor="w")
+            return
+        try:
+            names = _sec.tracked_names(
+                settings,
+                __import__("os").environ.get("MCP_EXTRA_HEADERS", ""),
+            )
+        except Exception:
+            names = ["CONTROL_PLANE_API_KEY", "OBSIDIAN_TOKEN"]
+        # Show the configured API var first even if untracked.
+        try:
+            api_name = api_var.get().strip() or "CONTROL_PLANE_API_KEY"
+            if api_name not in names:
+                names.insert(0, api_name)
+        except Exception:
+            pass
+        for name in names[:8]:
+            try:
+                src = _sec.secret_source(name)
+            except Exception:
+                src = "missing"
+            color = (
+                "#1a7f37" if src.startswith("vault")
+                else "#9a6700" if src == "env"
+                else "#b3261e"
+            )
+            row = ctk.CTkFrame(sec_list, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text=name, width=220,
+                         anchor="w").pack(side="left")
+            ctk.CTkLabel(
+                row, text=f"● {src}", text_color=color, width=110,
+            ).pack(side="left", padx=(8, 0))
+
+            def _save_to_vault(n=name):
+                dlg = ctk.CTkInputDialog(
+                    text=f"Paste value for {n}\n(it goes to Windows Vault, "
+                         "never shown again):",
+                    title=f"Save {n} to Vault",
+                )
+                try:
+                    val = dlg.get_input()
+                except Exception:
+                    val = None
+                if val and val.strip():
+                    try:
+                        _sec.vault_set(n, val)
+                        __import__("os").environ[n] = val
+                        messagebox.showinfo(
+                            "Saved",
+                            f"{n} is now in Windows Vault.",
+                            parent=win,
+                        )
+                    except Exception as exc:
+                        messagebox.showerror(
+                            "Vault save failed", str(exc), parent=win
+                        )
+                _refresh_secrets_ui()
+
+            def _move_to_vault(n=name):
+                try:
+                    res = _sec.move_env_to_vault(n, scrub_env_file=True)
+                    if res == "moved":
+                        messagebox.showinfo(
+                            "Moved",
+                            f"{n} moved from .env to Vault.\n"
+                            ".env entry blanked — restart tray.",
+                            parent=win,
+                        )
+                    elif res == "vault-only":
+                        messagebox.showinfo(
+                            "Already in Vault",
+                            f"{n} is already in Vault.",
+                            parent=win,
+                        )
+                    else:
+                        messagebox.showinfo(
+                            "Nothing to move",
+                            f"{n} has no value in .env or process.",
+                            parent=win,
+                        )
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Move failed", str(exc), parent=win
+                    )
+                _refresh_secrets_ui()
+
+            def _remove_from_vault(n=name):
+                if messagebox.askyesno(
+                    "Remove from Vault",
+                    f"Delete {n} from Windows Vault?\n"
+                    "You must have it in .env or re-add it.",
+                    parent=win,
+                ):
+                    try:
+                        _sec.vault_delete(n)
+                    except Exception:
+                        pass
+                    _refresh_secrets_ui()
+
+            ctk.CTkButton(row, text="Save…", width=70,
+                          command=_save_to_vault).pack(side="right")
+            ctk.CTkButton(row, text="Move .env→Vault", width=120,
+                          command=_move_to_vault).pack(
+                side="right", padx=(0, 6))
+            ctk.CTkButton(row, text="Forget", width=70,
+                          fg_color="#5f6368",
+                          command=_remove_from_vault).pack(
+                side="right", padx=(0, 6))
+
+    _refresh_secrets_ui()
+    ctk.CTkButton(
+        sec_card, text="Refresh vault status",
+        command=_refresh_secrets_ui,
+    ).pack(anchor="w", padx=14, pady=(0, 10))
+
     # Health card: updates + uptime + doctor + recent calls ------
     try:
         import app_health as _ah

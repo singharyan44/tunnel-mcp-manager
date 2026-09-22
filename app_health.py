@@ -367,14 +367,27 @@ def run_doctor(settings, registry, tunnel) -> list[dict]:
     except Exception as exc:
         _add(False, "Runtime check failed", str(exc)[:200])
 
-    # 2. API key.
+    # 2. API key (vault or env — value never shown).
     try:
         api_env = settings.api_key_env.strip() or "CONTROL_PLANE_API_KEY"
-        has = bool(os.environ.get(api_env, "").strip())
+        try:
+            import secrets_store as _sec
+
+            src = _sec.secret_source(api_env)
+        except Exception:
+            src = (
+                "env"
+                if os.environ.get(api_env, "").strip()
+                else "missing"
+            )
+        has = src in ("vault", "env", "vault+env")
         _add(
             has,
-            f"API key {api_env}: {'set' if has else 'MISSING'}",
-            "" if has else "Add it to .env, then restart tray.",
+            f"API key {api_env}: {src if has else 'MISSING'}",
+            "" if has else (
+                "Save it to Vault in Settings → Secrets, "
+                "or add it to .env, then restart tray."
+            ),
         )
     except Exception as exc:
         _add(False, "API key check failed", str(exc)[:200])

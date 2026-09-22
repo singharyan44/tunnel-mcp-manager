@@ -398,12 +398,21 @@ class TunnelManager:
         )
         api_value = os.environ.get(api_env, "").strip()
         if not api_value:
+            try:
+                import secrets_store as _sec
+
+                _sec.inject_secrets(self.settings)
+                api_value = os.environ.get(api_env, "").strip()
+            except Exception:
+                pass
+        if not api_value:
             dotenv_path = self.root / ".env"
             raise RuntimeError(
                 "Runtime API key environment variable "
                 f"'{api_env}' is empty or missing.\n\n"
-                f"The launcher checked:\n{dotenv_path}\n\n"
-                f"Add {api_env}=<key> there, "
+                f"Checked Windows Vault + {dotenv_path}\n\n"
+                f"Either save it to Vault in Settings → Secrets, "
+                f"or add {api_env}=<key> to .env, "
                 "then restart the tray app."
             )
 

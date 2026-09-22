@@ -121,21 +121,29 @@ def build_registry(
     # personal default below is kept only as a hint, never required.
     # ------------------------------------------------------------------
 
-    _godot_hint = (
+    _godot_candidates = [
+        Path.home()
+        / "Documents"
+        / "GitHub"
+        / "UNSEEN"
+        / ".mcp"
+        / "venv"
+        / "Scripts"
+        / "godot-editor-mcp.exe",
         Path.home()
         / "Documents"
         / "GitHub"
         / "godot-mcp"
         / ".venv"
         / "Scripts"
-        / "godot-editor-mcp.exe"
-    )
+        / "godot-editor-mcp.exe",
+    ]
 
-    godot_default = (
-        (_windows_path_for_command(_godot_hint),)
-        if _godot_hint.exists()
-        else ()
-    )
+    godot_default = ()
+    for _cand in _godot_candidates:
+        if _cand.exists():
+            godot_default = (_windows_path_for_command(_cand),)
+            break
 
     # ------------------------------------------------------------------
     # OpenSCAD MCP

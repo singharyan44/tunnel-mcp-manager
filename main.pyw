@@ -36,7 +36,10 @@ STARTUP_KEY = (
     r"Software\Microsoft\Windows\CurrentVersion\Run"
 )
 
-STARTUP_NAME = "OpenSCAD_MCP_Manager"
+STARTUP_NAME = "MCP_Manager_Tray"
+# Old value name from before open-sourcing; may point at a deleted
+# script. Cleaned up automatically when enabling startup.
+LEGACY_STARTUP_NAMES = ("OpenSCAD_MCP_Manager",)
 
 PID_FILE = ROOT / "mcp-manager.pid"
 
@@ -177,6 +180,7 @@ def acquire_single_instance(auto_replace: bool = False) -> bool:
     ):
         pass
 
+    boot_mode = "--minimized" in sys.argv
     if (
         existing_pid
         and _process_exists(existing_pid)
@@ -184,6 +188,10 @@ def acquire_single_instance(auto_replace: bool = False) -> bool:
     ):
         if auto_replace:
             replace = True
+        elif boot_mode:
+            # At Windows login there is nobody to answer a popup:
+            # exit quietly and keep the running instance.
+            return False
         else:
             prompt = tk.Tk()
             prompt.withdraw()
@@ -257,7 +265,24 @@ def release_single_instance() -> None:
 
 load_dotenv()
 
+# Secret injector: vault values fill env vars that .env lacks.
+# Values never touch settings.json or logs (only env:NAME refs).
+try:
+    import secrets_store as _secrets
+
+    _secret_sources: dict[str, str] = _secrets.inject_secrets(None)
+except Exception:
+    _secret_sources = {}
+
 settings: ManagerSettings = load_settings()
+
+# Re-inject now that we know the configured api_key_env name.
+try:
+    import secrets_store as _secrets2
+
+    _secret_sources = _secrets2.inject_secrets(settings)
+except Exception:
+    pass
 
 settings.tunnel_id = os.environ.get(
     "CONTROL_PLANE_TUNNEL_ID",
@@ -335,6 +360,7 @@ icon: Icon
 
 settings_window_lock = threading.Lock()
 settings_window_open = False
+settings_window_opened_at: float = 0.0
 _last_menu_fingerprint: str = ""
 
 
@@ -655,7 +681,7 @@ def restart_server(
 # WINDOWS STARTUP
 # ------------------------------------------------------------
 
-def startup_enabled() -> bool:
+def _read_startup_value(name: str) -> str:
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
@@ -663,18 +689,53 @@ def startup_enabled() -> bool:
             0,
             winreg.KEY_READ,
         ) as key:
-            winreg.QueryValueEx(
-                key,
-                STARTUP_NAME,
-            )
+            value, _kind = winreg.QueryValueEx(key, name)
+            return str(value)
+    except (FileNotFoundError, OSError):
+        return ""
 
-        return True
 
-    except (
-        FileNotFoundError,
-        OSError,
-    ):
-        return False
+def startup_entry_status() -> dict:
+    """Diagnose the login entry: missing | ok | stale-target | legacy.
+
+    Stale-target = points at a script that no longer exists (the exact
+    failure seen: entry aimed at a deleted .pyw, so login did nothing).
+    """
+    current = _read_startup_value(STARTUP_NAME)
+    if current:
+        # Extract quoted script path (second quoted chunk).
+        import re as _re
+
+        parts = _re.findall(r'"([^"]+)"', current)
+        script = parts[1] if len(parts) >= 2 else (
+            parts[0] if parts else ""
+        )
+        expected = str(_app_script_path())
+        if script and Path(script).exists():
+            if os.path.normcase(script) == os.path.normcase(expected):
+                return {"state": "ok", "value": current}
+            return {
+                "state": "wrong-target",
+                "value": current,
+                "expected": expected,
+            }
+        return {
+            "state": "stale-target",
+            "value": current,
+            "expected": expected,
+        }
+    for legacy in LEGACY_STARTUP_NAMES:
+        if _read_startup_value(legacy):
+            return {
+                "state": "legacy",
+                "value": _read_startup_value(legacy),
+                "legacy_name": legacy,
+            }
+    return {"state": "missing", "value": ""}
+
+
+def startup_enabled() -> bool:
+    return startup_entry_status()["state"] == "ok"
 
 
 def _app_script_path() -> Path:
@@ -710,6 +771,9 @@ def get_launch_command() -> str:
 
 def set_startup_enabled(enabled: bool) -> tuple[bool, str]:
     try:
+        script = _app_script_path()
+        if not getattr(sys, "frozen", False) and not script.exists():
+            return False, f"App script not found: {script}"
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             STARTUP_KEY,
@@ -717,22 +781,43 @@ def set_startup_enabled(enabled: bool) -> tuple[bool, str]:
             winreg.KEY_SET_VALUE,
         ) as key:
             if not enabled:
-                try:
-                    winreg.DeleteValue(key, STARTUP_NAME)
-                except FileNotFoundError:
-                    pass
+                for name in (STARTUP_NAME, *LEGACY_STARTUP_NAMES):
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        pass
                 settings.tray_autostart = False
             else:
+                command = get_launch_command()
                 winreg.SetValueEx(
                     key,
                     STARTUP_NAME,
                     0,
                     winreg.REG_SZ,
-                    get_launch_command(),
+                    command,
                 )
+                # Remove legacy / colliding entries so login runs ONE app.
+                for name in LEGACY_STARTUP_NAMES:
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        pass
+                # Read back to confirm Windows accepted it.
+                try:
+                    check, _k = winreg.QueryValueEx(key, STARTUP_NAME)
+                    if str(check) != command:
+                        return False, "Windows did not keep the entry."
+                except FileNotFoundError:
+                    return False, "Entry missing right after write."
                 settings.tray_autostart = True
-        save_settings(settings)
-        refresh()
+        try:
+            save_settings(settings)
+        except OSError as exc:
+            return False, f"Entry written but settings save failed: {exc}"
+        try:
+            refresh()
+        except Exception:
+            pass
         return True, "OK"
     except OSError as exc:
         return False, str(exc)
@@ -1594,13 +1679,26 @@ def open_settings(
     _icon=None,
     _item=None,
 ):
-    global settings_window_open
+    global settings_window_open, settings_window_opened_at
 
     with settings_window_lock:
         if settings_window_open:
-            return
+            # Stale-flag safety: a dead settings thread must never
+            # block the window forever. 60s is far beyond any normal
+            # open; treat older as crashed and allow a fresh open.
+            if time.monotonic() - settings_window_opened_at < 60:
+                try:
+                    tray_notify(
+                        "Settings",
+                        "Settings window is already open.",
+                    )
+                except Exception:
+                    pass
+                return
+            settings_window_open = False
 
         settings_window_open = True
+        settings_window_opened_at = time.monotonic()
 
     threading.Thread(
         target=_open_settings_window,
@@ -1936,6 +2034,20 @@ icon = Icon(
 if __name__ == "__main__":
     want_restart = "--restart" in sys.argv
     want_dev = "--dev" in sys.argv
+    boot_mode = "--minimized" in sys.argv
+
+    if boot_mode:
+        # Trace login launches (windowed app has no console).
+        try:
+            with open(
+                ROOT / "startup-boot.log", "a", encoding="utf-8"
+            ) as _bf:
+                _bf.write(
+                    time.strftime("%Y-%m-%d %H:%M:%S")
+                    + f" boot launch pid={os.getpid()}\n"
+                )
+        except OSError:
+            pass
 
     if not acquire_single_instance(auto_replace=want_restart):
         sys.exit(0)
